@@ -1,0 +1,140 @@
+import type {Request,Response} from "express";
+import jwt from "jsonwebtoken";
+import { authorizationCode, clients, refreshToken, users } from "../../db/schema.js";
+import { privateKey } from "../../config/keys.js";
+import crypto from "crypto";
+import { db } from "../../db/index.js";
+import type { TokenType } from "./token.schema.js";
+import { eq } from "drizzle-orm";
+import AppError from "../../utils/AppError.js";
+import bcrypt from "bcrypt"
+
+function buildAccessToken(user:typeof users.$inferSelect,audience:string,scopes:string[]){
+    return jwt.sign(
+        {
+            sub:user.id.toString(),
+            email:user.email,
+            name:`${user.firstName} ${user.lastName || ""}`.trim(),
+            scope:scopes.join(" "),
+        },
+        privateKey,
+        {
+            algorithm:"RS256",
+            expiresIn:"1h",
+            issuer:process.env.ISSUER,
+            audience
+        }
+    );
+}
+
+
+function buildRefreshTokenValue(){
+    return crypto.randomBytes(32).toString("hex");
+}
+
+async function issueTokenResponse(user:typeof users.$inferSelect,clientDbId:number,clientAudience:string,scopes:string[]) {
+    const accessToken = buildAccessToken(user,clientAudience,scopes);
+    const refreshTokenValue = buildRefreshTokenValue();;
+    const refreshTokenHash = crypto.createHash("sha256").update(refreshTokenValue).digest("hex");
+    const expiresAt = new Date(Date.now() + 30*24*60*60*1000);// 30 days
+
+    await db.insert(refreshToken).values({
+        tokenHash:refreshTokenHash,
+        userId:user.id,
+        clientId:clientDbId,
+        grantedScopes:scopes,
+        expiresAt,
+    });
+
+    return {
+        access_token:accessToken,
+        refresh_token:refreshTokenValue,
+        token_type:"Bearer",
+        expires_in:3600,
+    }
+}
+
+export async function exchangeToken(req:Request,res:Response) {
+    const body = (req.validatedData as TokenType).body;
+    const {grant_type,client_id,client_secret} = body;
+
+    const [client] = await db.select().from(clients).where(eq(clients.clientId,client_id));
+    if(!client || client.deletedAt){
+        throw new AppError("Invalid client_id",400);
+    }
+
+    const isSecretValid = await bcrypt.compare(client_secret,client.clientSecretHash || "");
+    if(!isSecretValid){
+        throw new AppError("Invalid client_secret", 401);
+    }
+
+    if(grant_type==="authorization_code"){
+        const {code,redirect_uri} = body;
+
+        const [authCode] = await db.select().from(authorizationCode).where(eq(authorizationCode.code,code));
+        if(!authCode || authCode.expiresAt < new Date()){
+            throw new AppError("Invalid authorization code", 400);
+        }
+
+        if(!client.redirectUris.includes(redirect_uri)){
+            throw new AppError("redirect_uri mismatch", 400);
+        }
+
+        if(authCode.clientId !== client.id){
+            throw new AppError(
+                "Authorization code does not belong to this client",
+                400,
+            );
+        }
+
+        if(authCode.redirectUri !== redirect_uri){
+            throw new AppError("redirect_uri mismatch", 400);
+        }
+
+        await db.delete(authorizationCode).where(eq(authorizationCode.code,code));
+
+        const [user] = await db.select().from(users).where(eq(users.id,authCode.userId));
+
+    if(!user || user.deletedAt){
+        throw new AppError("User not found", 400);
+    }
+
+    const tokenResponse = await issueTokenResponse(user,client.id,client.clientId,authCode.scopes);
+
+    return res.status(200).json(tokenResponse);
+    }
+
+    const {refresh_token} = body;
+
+    const refreshTokenHash = crypto.createHash("sha256").update(refresh_token).digest("hex");
+
+    const [storedRefreshtoken] = await db.select().from(refreshToken).where(eq(refreshToken.tokenHash,refreshTokenHash));
+
+    if(!storedRefreshtoken){
+        throw new AppError("Invalid refresh token",400);
+    }
+
+    if(storedRefreshtoken.revokedAt){
+        throw new AppError("Refresh token revoked",400);
+    }
+
+    if(storedRefreshtoken.expiresAt < new Date()){
+        throw new AppError("Refresh token expired",400);
+    }
+
+    if(storedRefreshtoken.clientId !== client.id){
+        throw new AppError("Refresh token does not belong to this client",400);
+    }
+
+    const [user] = await db.select().from(users).where(eq(users.id,storedRefreshtoken.userId));
+
+    if(!user || user.deletedAt){
+        throw new AppError("User not found", 400);
+    }
+
+    await db.update(refreshToken).set({revokedAt:new Date()}).where(eq(refreshToken.tokenHash,refreshTokenHash));
+
+    const tokenResponse = await issueTokenResponse(user,client.id,client.clientId,storedRefreshtoken.grantedScopes);
+
+    return res.status(200).json(tokenResponse);
+}
