@@ -41,9 +41,6 @@ export async function getUserInfo(req:Request,res:Response) {
 
     const response:any = {
         sub:user.id.toString(),
-        first_name:user.firstName,
-        last_name:user.lastName || undefined,
-        email:user.email,
     };
 
     if (scopes.includes("profile")) {
