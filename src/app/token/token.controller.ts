@@ -27,6 +27,30 @@ function buildAccessToken(user:typeof users.$inferSelect,audience:string,scopes:
     );
 }
 
+function buildIdToken(user:typeof users.$inferSelect,audience:string,scopes:string[]){
+    const idTokenClaims:Record<string,unknown> ={
+        sub: user.id.toString()
+    };
+
+    if(scopes.includes("profile")){
+        idTokenClaims.name = `${user.firstName} ${user.lastName || ""}`.trim();
+        idTokenClaims.given_name = user.firstName;
+        idTokenClaims.family_name = user.lastName || undefined;
+    }
+
+    if(scopes.includes("email")){
+        idTokenClaims.email = user.email;
+        idTokenClaims.email_verified = user.emailVerified;
+    }
+
+    return jwt.sign(idTokenClaims,privateKey,{
+        algorithm:"RS256",
+        expiresIn:"1h",
+        issuer:process.env.ISSUER,
+        audience,
+    });
+}
+
 
 function buildRefreshTokenValue(){
     return crypto.randomBytes(32).toString("hex");
@@ -34,6 +58,7 @@ function buildRefreshTokenValue(){
 
 async function issueTokenResponse(user:typeof users.$inferSelect,clientDbId:number,clientAudience:string,scopes:string[]) {
     const accessToken = buildAccessToken(user,clientAudience,scopes);
+    const idToken = buildIdToken(user,clientAudience,scopes);
     const refreshTokenValue = buildRefreshTokenValue();;
     const refreshTokenHash = crypto.createHash("sha256").update(refreshTokenValue).digest("hex");
     const expiresAt = new Date(Date.now() + 30*24*60*60*1000);// 30 days
@@ -48,6 +73,7 @@ async function issueTokenResponse(user:typeof users.$inferSelect,clientDbId:numb
 
     return {
         access_token:accessToken,
+        id_token:idToken,
         refresh_token:refreshTokenValue,
         token_type:"Bearer",
         expires_in:3600,
