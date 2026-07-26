@@ -27,7 +27,7 @@
     "drizzle-kit": "^0.31.10",
     "tsc-watch": "^7.2.1",
     "tsx": "^4.23.1",
-    "typescript": "^7.0.2"
+    "typescript": "^5.9.2"
   },
   "dependencies": {
     "@types/cookie-parser": "^1.4.10",
