@@ -24,9 +24,8 @@ export default function createServerApplication():Application {
     
 
     app.get("/",(req,res)=>{
-        console.log("SumitAuth is working");
         return res.status(200).json({
-            message:"everything is okay"
+            message:"Welcome to SumitAuth"
         })
     });
 
